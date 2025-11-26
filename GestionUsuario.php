@@ -28,7 +28,9 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Constantes de configuración
-define('DEFAULT_PASSWORD', 'Simag2025');
+// La contraseña por defecto debe configurarse mediante variable de entorno
+// para evitar exposición en el código fuente
+define('DEFAULT_PASSWORD', getenv('SIMAG_DEFAULT_PASSWORD') ?: 'Simag2025');
 define('MIN_PASSWORD_LENGTH', 8);
 define('MAX_LOGIN_ATTEMPTS', 5);
 define('LOCKOUT_TIME', 900); // 15 minutos en segundos
@@ -93,13 +95,23 @@ class GestionUsuario
      */
     private function getDbConfig()
     {
-        // En producción, estos valores deberían venir de un archivo de configuración
-        // o variables de entorno
+        // IMPORTANTE: En producción, estos valores DEBEN venir de variables de entorno
+        // No utilice los valores por defecto en producción
+        $server = getenv('DB_SERVER');
+        $database = getenv('DB_DATABASE');
+        $username = getenv('DB_USERNAME');
+        $password = getenv('DB_PASSWORD');
+        
+        // Validar que las credenciales estén configuradas en producción
+        if (empty($server) || empty($database) || empty($username)) {
+            $this->logError('Configuración de base de datos incompleta. Configure las variables de entorno.', 'WARNING');
+        }
+        
         return [
-            'server' => getenv('DB_SERVER') ?: 'localhost',
-            'database' => getenv('DB_DATABASE') ?: 'SimagDB',
-            'username' => getenv('DB_USERNAME') ?: 'sa',
-            'password' => getenv('DB_PASSWORD') ?: ''
+            'server' => $server ?: 'localhost',
+            'database' => $database ?: 'SimagDB',
+            'username' => $username ?: '',
+            'password' => $password ?: ''
         ];
     }
 
@@ -458,10 +470,12 @@ class GestionUsuario
             }
 
             // Filtro de búsqueda
+            // Nota: PDO requiere parámetros únicos para cada uso en la consulta,
+            // por lo que se crean múltiples parámetros con el mismo valor
             if (isset($filters['busqueda']) && $filters['busqueda'] !== '') {
                 $busqueda = '%' . $this->sanitizeInput($filters['busqueda']) . '%';
-                $whereConditions[] = '(u.NombreUsuario LIKE :busqueda OR u.Nombre LIKE :busqueda2 OR u.Apellido LIKE :busqueda3 OR u.Rut LIKE :busqueda4 OR u.Email LIKE :busqueda5)';
-                $params[':busqueda'] = $busqueda;
+                $whereConditions[] = '(u.NombreUsuario LIKE :busqueda1 OR u.Nombre LIKE :busqueda2 OR u.Apellido LIKE :busqueda3 OR u.Rut LIKE :busqueda4 OR u.Email LIKE :busqueda5)';
+                $params[':busqueda1'] = $busqueda;
                 $params[':busqueda2'] = $busqueda;
                 $params[':busqueda3'] = $busqueda;
                 $params[':busqueda4'] = $busqueda;
@@ -775,8 +789,8 @@ class GestionUsuario
             $activo = isset($userData['activo']) ? intval($userData['activo']) : 1;
 
             // Insertar usuario
-            // El hash de contraseña se almacena como VARCHAR para mantener compatibilidad
-            // con password_verify() que requiere el hash como string
+            // El hash de contraseña bcrypt (60 caracteres) se almacena como VARCHAR(255)
+            // para mantener compatibilidad con password_verify()
             $sql = "
                 INSERT INTO Usuario (
                     NombreUsuario, 
@@ -793,7 +807,7 @@ class GestionUsuario
                 )
                 VALUES (
                     :nombreUsuario,
-                    CONVERT(VARBINARY(255), :password),
+                    :password,
                     :nombre,
                     :apellido,
                     :rut,
@@ -1010,7 +1024,8 @@ class GestionUsuario
     {
         $passwordHash = $this->hashPassword($newPassword);
         
-        $sql = "UPDATE Usuario SET Password = CONVERT(VARBINARY(255), :password), FechaModificacion = GETDATE() WHERE IdUsuario = :idUsuario";
+        // El hash bcrypt se almacena directamente como VARCHAR(255)
+        $sql = "UPDATE Usuario SET Password = :password, FechaModificacion = GETDATE() WHERE IdUsuario = :idUsuario";
         $stmt = $this->conn->prepare($sql);
         $stmt->bindValue(':password', $passwordHash);
         $stmt->bindValue(':idUsuario', intval($idUsuario), PDO::PARAM_INT);
@@ -1203,9 +1218,11 @@ class GestionUsuario
 
             $this->logError("Contraseña restablecida para usuario ID {$idUsuario}", 'INFO');
 
+            // No devolver la contraseña en la respuesta por seguridad
+            // El administrador debe comunicar la nueva contraseña por un canal seguro
             return [
                 'success' => true,
-                'message' => 'Contraseña restablecida exitosamente. La nueva contraseña es: ' . DEFAULT_PASSWORD
+                'message' => 'Contraseña restablecida exitosamente. La nueva contraseña ha sido establecida al valor predeterminado del sistema.'
             ];
 
         } catch (PDOException $e) {
@@ -1250,12 +1267,12 @@ class GestionUsuario
             }
 
             // Obtener usuario con contraseña
-            // Convertir VARBINARY a VARCHAR para poder usar password_verify
+            // La contraseña se almacena como VARCHAR(255) para compatibilidad con password_verify
             $sql = "
                 SELECT 
                     IdUsuario, 
                     NombreUsuario, 
-                    CAST(Password AS VARCHAR(255)) AS Password,
+                    Password,
                     Nombre, 
                     Apellido, 
                     Activo
